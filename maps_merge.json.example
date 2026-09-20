@@ -1,0 +1,16 @@
+{
+  "keys": {
+    "parameter_value": 6,
+    "parameter_attributes": 6,
+    "open_property": 6,
+    "control_mode": 2,
+    "object_type_swid": 1,
+    "base_network_object": "all",
+    "base_network_connection": "all",
+    "history": "all",
+    "network_properties": 1
+  },
+  "default_key": "all_but_last",
+  "monotonic": {"network_properties": ["version_number"]},
+  "add_history_entry": false
+}

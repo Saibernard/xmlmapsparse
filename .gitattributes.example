@@ -1,0 +1,9 @@
+# Merge and diff rules for the servo-group repo.
+# For a private trial, put these lines in .git/info/attributes of your own clone
+# (they override the committed .gitattributes for you only).
+# For the whole team, replace the "*.MAPS binary" and "*.mdl binary" lines in the
+# committed .gitattributes with these.
+*.MAPS        merge=maps diff=maps
+*.MAPS.static binary
+*.mdl         binary merge=mlAutoMerge
+*.slx         binary merge=mlAutoMerge
