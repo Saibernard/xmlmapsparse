@@ -39,8 +39,8 @@ results = [];
     end
 
     function [st, out] = sh(cmd)
-        % run python/git without MATLAB's library path leaking into them
-        [st, out] = system(['env -u LD_LIBRARY_PATH ' cmd]);
+        % run python/git without MATLAB's own library path leaking into them
+        [st, out] = system(['env -u LD_LIBRARY_PATH -u LD_PRELOAD ' cmd]);
         out = strtrim(out);
     end
 
@@ -67,7 +67,18 @@ say('');
 
 %% A. MAPS
 say('== A. MAPS merge logic and Git driver ==');
-[st, out] = sh(sprintf('python "%s" selftest "%s" --git', mapsMergePy, mapsFile));
+py = '';
+for cand = {'python', 'python3', 'python2'}
+    [stc, ~] = sh(sprintf('%s -c "import sys" 2>/dev/null', cand{1}));
+    if stc == 0, py = cand{1}; break, end
+end
+if isempty(py)
+    check(false, 'a python interpreter is on PATH', 'tried python, python3, python2');
+    py = 'python';
+else
+    say('using interpreter: %s', py);
+end
+[st, out] = sh(sprintf('%s "%s" selftest "%s" --git', py, mapsMergePy, mapsFile));
 say('%s', out);
 nPass = numel(regexp(out, '(?m)^PASS', 'match'));
 nFail = numel(regexp(out, '(?m)^FAIL', 'match'));
@@ -224,7 +235,13 @@ say('== F. End to end: one git merge changing MAPS and MDL together ==');
         args = sprintf(' %s', varargin{:});
         [st, out] = sh(sprintf('git -C "%s"%s', repo, args));
     end
+needF = {'pf_a1', 'pf_b1', 'pf_a2'};
+haveF = all(cellfun(@(n) exist(P(n), 'file') == 2, needF));
+if ~haveF
+    say('INFO  F skipped: section D did not produce the model variants it needs');
+end
 try
+    if ~haveF, error('prove_merge_pipeline:noVariants', 'model variants missing'); end
     repo = fullfile(work, 'repo');
     mkdir(repo);
     rm = [mname mext]; rd = [dname dext];
@@ -233,7 +250,7 @@ try
     g(repo, 'config user.email proof@maps_merge');
     g(repo, 'config user.name "merge proof"');
     g(repo, 'config commit.gpgsign false');
-    g(repo, 'config merge.maps.driver', [q '"python" "' mapsMergePy '" merge %O %A %B -L %L -P %P' q]);
+    g(repo, 'config merge.maps.driver', [q '"' py '" "' mapsMergePy '" merge %O %A %B -L %L -P %P' q]);
     g(repo, 'config merge.maps.recursive binary');
     g(repo, 'config merge.mlAutoMerge.driver', [q '"' exe '" %O %A %B %A' q]);
     fid = fopen(fullfile(repo, '.gitattributes'), 'w');
@@ -279,13 +296,15 @@ try
           regexprep(status, '\s+', ' '));
     g(repo, 'merge --abort');
 catch err
-    check(false, 'end-to-end git scenarios aborted', err.message);
+    if ~strcmp(err.identifier, 'prove_merge_pipeline:noVariants')
+        check(false, 'end-to-end git scenarios aborted', err.message);
+    end
 end
 say('');
 
 %% E. crosscheck (informational)
 say('== E. Model-to-MAPS consistency (informational) ==');
-[st, out] = sh(sprintf('python "%s" crosscheck "%s" "%s"', mapsMergePy, mdlFile, mapsFile));
+[st, out] = sh(sprintf('%s "%s" crosscheck "%s" "%s"', py, mapsMergePy, mdlFile, mapsFile));
 say('%s', out);
 say('INFO  crosscheck exit %d. If every MAPS object is reported missing, the naming rule needs --map/--strip/--prefix.', st);
 say('');

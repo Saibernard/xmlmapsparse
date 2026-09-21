@@ -17,7 +17,7 @@ Python 2.7 and Python 3.x. Nothing is installed.
 | `maps_merge.json.example` | optional key configuration, only needed if `inspect` shows a wrong key |
 | `tests/` | test suite, run with `python -m unittest discover -s tests` |
 | `test_mdl_merge.m` | optional MATLAB script that exercises `mlAutoMerge` on throwaway copies of a model |
-| `prove_merge_pipeline.m` | MATLAB script that checks the whole pipeline end to end and writes a PASS/FAIL report: `prove_merge_pipeline('x.MAPS', 'x.mdl', 'maps_merge.py')` |
+| `prove_merge_pipeline.m` | MATLAB script that checks the whole pipeline end to end and writes a PASS/FAIL report |
 
 ## Private trial, in your own clone, invisible to everyone else
 
@@ -52,6 +52,28 @@ Python 2.7 and Python 3.x. Nothing is installed.
 To undo the trial: `git config --unset merge.maps.driver` (and the other
 `merge.maps.*`, `diff.maps.*`, `merge.mlAutoMerge.*` keys) and delete
 `.git/info/attributes`.
+
+## Proving the whole thing in one go
+
+From the MATLAB command window, with the three paths filled in:
+
+    prove_merge_pipeline('/repo/.../RQxSV.MAPS', '/repo/.../RQxSV.mdl', '/home/you/maps_merge.py')
+
+It prints a PASS/FAIL line per check and writes `merge_proof_<timestamp>.txt` in the
+current folder. Nothing in the repository is modified and no branches are created
+there; the Git scenarios run in a throwaway repository in a temp folder. Close the
+model in Simulink first, or the script refuses to start.
+
+What it checks:
+
+| section | check |
+|---|---|
+| A | MAPS merge logic, plus real `git merge`, `git diff` and `git rebase` in a temp repo |
+| B | this clone routes `.MAPS` to the maps driver and `.mdl` to `mlAutoMerge` |
+| C | `mlAutoMerge` is present under this MATLAB |
+| D | MDL scenarios on copies of the model: identical, different top-level subsystems, different nested subsystems, same subsystem (expected conflict), same-name clash (expected conflict) |
+| F | one `git merge` where the MAPS file and the model both changed: clean case and conflict case, through both drivers at once |
+| E | model-to-MAPS consistency (informational) |
 
 ## Team rollout
 
