@@ -159,10 +159,15 @@ class TestKeys(unittest.TestCase):
         self.assertEqual(mm.key_width(self.cfg, "control_mode", 4), 2)
 
     def test_widening_when_not_unique(self):
-        recs = self.mf.blocks["conf_group_object"]      # (group, object): group alone is not unique
-        n, full, widened = mm.resolve_width(self.cfg, "conf_group_object", [recs])
+        cfg = mm.load_config(os.devnull)
+        cfg["keys"]["conf_group_object"] = 1            # (group, object): group alone is not unique
+        recs = self.mf.blocks["conf_group_object"]
+        n, full, widened = mm.resolve_width(cfg, "conf_group_object", [recs])
         self.assertTrue(widened)
         self.assertEqual(n, 2)
+        # with the shipped default ("all") nothing needs widening
+        n, full, widened = mm.resolve_width(self.cfg, "conf_group_object", [recs])
+        self.assertFalse(widened)
 
     def test_identical_duplicate_records_survive(self):
         text = gen_maps.gen()
@@ -636,6 +641,8 @@ class TestCommandLine(unittest.TestCase):
         # the written config is accepted back
         code, out, err = self.run_cli("check", p, "--config", cfgp)
         self.assertEqual(code, 0)
+        self.assertNotIn("widened", out)
+        code, out, err = self.run_cli("check", p)
         self.assertNotIn("widened", out)
 
     def test_selftest_passes(self):

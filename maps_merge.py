@@ -85,6 +85,10 @@ DEFAULT_CONFIG = {
         "object_type_swid": 1,       # object -> type, swid
         "base_network_object": "all",
         "base_network_connection": "all",
+        "conf_group_object": "all",      # (group, object) pairs
+        "conf_group_option": "all",
+        "object_and_dataset": "all",     # (object, dataset) pairs
+        "output_port": "all",            # (object, port) pairs
         "history": "all",
         "network_properties": 1,     # name -> value
         "maps_general": 1,
