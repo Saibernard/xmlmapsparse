@@ -17,6 +17,7 @@ Python 2.7 and Python 3.x. Nothing is installed.
 | `maps_merge.json.example` | optional key configuration, only needed if `inspect` shows a wrong key |
 | `tests/` | test suite, run with `python -m unittest discover -s tests` |
 | `test_mdl_merge.m` | optional MATLAB script that exercises `mlAutoMerge` on throwaway copies of a model |
+| `prove_merge_pipeline.m` | MATLAB script that checks the whole pipeline end to end and writes a PASS/FAIL report: `prove_merge_pipeline('x.MAPS', 'x.mdl', 'maps_merge.py')` |
 
 ## Private trial, in your own clone, invisible to everyone else
 
