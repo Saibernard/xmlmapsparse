@@ -932,11 +932,15 @@ def cmd_check(args):
 # ---------------------------------------------------------------------------
 
 class SelfTest(object):
-    def __init__(self, path, keep=False, config=None, verbose=True):
+    def __init__(self, path, keep=False, config=None, verbose=True, use_git=False,
+                 matlabroot=None, mdl=None):
         self.src = path
         self.keep = keep
         self.cfg = load_config(config)
         self.verbose = verbose
+        self.use_git = use_git
+        self.matlabroot = matlabroot
+        self.mdl = mdl
         self.results = []
         self.work = tempfile.mkdtemp(prefix="maps_selftest_")
 
@@ -1145,7 +1149,114 @@ class SelfTest(object):
         # 15. the merged file passes check
         problems, _, _ = check_file(po, self.cfg)
         self.log(not problems, "merged file passes structural check")
+
+        if self.use_git:
+            self.run_git_suite(base_text, ours, theirs, theirs_clash, l1, l2, l1b)
+        if self.matlabroot:
+            self.run_matlab_suite()
         return self.finish()
+
+    def run_git_suite(self, base_text, ours, theirs, clash, l1, l2, l1b):
+        """A throwaway git repository around a copy of the file, with the driver
+        registered exactly as `setup --apply` would do it."""
+        repo = os.path.join(self.work, "repo")
+        os.makedirs(repo)
+        name = os.path.basename(self.src)
+        fpath = os.path.join(repo, name)
+
+        def git(*args):
+            try:
+                proc = subprocess.Popen(["git"] + list(args), cwd=repo,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except OSError as exc:
+                return 127, str(exc)
+            out = proc.communicate()[0]
+            if not PY2:
+                out = out.decode("latin-1", "replace")
+            return proc.returncode, out
+
+        code, out = git("init", "-q")
+        if code != 0:
+            self.log(False, "git: repository created", out.strip())
+            return
+        git("config", "user.email", "selftest@maps_merge")
+        git("config", "user.name", "maps_merge selftest")
+        git("config", "commit.gpgsign", "false")
+        git("checkout", "-q", "-b", "base")
+        write_text(fpath, base_text)
+        write_text(os.path.join(repo, ".gitattributes"), "\n".join(ATTR_LINES) + "\n")
+        for k, v in git_config_lines(os.path.abspath(__file__), sys.executable, None):
+            git("config", k, v)
+        git("add", ".")
+        code, out = git("commit", "-q", "-m", "base")
+        self.log(code == 0, "git: repository created with the driver registered as setup does it", out.strip())
+        code, out = git("check-attr", "merge", "--", name)
+        self.log("merge: maps" in out, "git: the file is routed to the maps driver", out.strip())
+
+        git("checkout", "-q", "-b", "alice")
+        write_text(fpath, ours)
+        git("commit", "-q", "-am", "alice")
+        git("checkout", "-q", "base")
+        git("checkout", "-q", "-b", "bob")
+        write_text(fpath, theirs)
+        git("commit", "-q", "-am", "bob")
+        code, out = git("merge", "--no-edit", "alice")
+        merged = read_text(fpath)
+        self.log(code == 0 and l1 in merged and l2 in merged and "0 conflict(s)" in out,
+                 "git merge: two branches with different edits merge cleanly",
+                 " ".join(l for l in out.split("\n") if "maps_merge" in l).strip())
+
+        code, out = git("diff", "base", "alice", "--", name)
+        self.log("+" + l1 in out and "Binary files" not in out,
+                 "git diff: shows the changed record instead of 'Binary files differ'")
+
+        git("checkout", "-q", "base")
+        git("checkout", "-q", "-b", "carol")
+        write_text(fpath, clash)
+        git("commit", "-q", "-am", "carol")
+        code, out = git("merge", "--no-edit", "alice")
+        text = read_text(fpath)
+        _, status = git("status", "--porcelain")
+        self.log(code != 0 and "<<<<<<< ours" in text and l1 in text and l1b in text and "UU " in status,
+                 "git merge: same record changed on both branches stops with a conflict",
+                 " ".join(l for l in out.split("\n") if "CONFLICT" in l).strip()[:120])
+        git("merge", "--abort")
+
+        git("checkout", "-q", "base")
+        git("checkout", "-q", "-b", "dave")
+        write_text(fpath, theirs)
+        git("commit", "-q", "-am", "dave")
+        code, out = git("rebase", "alice")
+        merged = read_text(fpath)
+        self.log(code == 0 and l1 in merged and l2 in merged, "git rebase: uses the driver too")
+
+    def run_matlab_suite(self):
+        exe = mlautomerge_path(self.matlabroot)
+        self.log(os.path.isfile(exe), "MathWorks mlAutoMerge present", exe)
+        if not os.path.isfile(exe):
+            return
+        if not self.mdl:
+            self.log(True, "mlAutoMerge run on a model (skipped, pass --mdl MODEL.mdl to try it)")
+            return
+        ext = os.path.splitext(self.mdl)[1] or ".mdl"
+        copies = []
+        for n in ("mt_base", "mt_ours", "mt_theirs"):
+            dst = os.path.join(self.work, n + ext)
+            shutil.copyfile(self.mdl, dst)
+            copies.append(dst)
+        original = read_text(copies[1])
+        try:
+            proc = subprocess.Popen([exe, copies[0], copies[1], copies[2], copies[1]],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out = proc.communicate()[0]
+            if not PY2:
+                out = out.decode("latin-1", "replace")
+            code = proc.returncode
+        except OSError as exc:
+            code, out = 127, str(exc)
+        ok = code == 0 and os.path.isfile(copies[1]) and read_text(copies[1]) == original
+        self.log(ok, "mlAutoMerge runs on this model (three identical copies, exit 0, unchanged)",
+                 ("exit %d " % code) + out.strip().replace("\n", " | ")[:200])
 
     def finish(self):
         passed = sum(1 for ok, _, _ in self.results if ok)
@@ -1166,7 +1277,8 @@ def cmd_selftest(args):
     except ParseError as exc:
         eprint("maps_merge: %s" % exc)
         return 2
-    return SelfTest(args.file, keep=args.keep, config=args.config).run()
+    return SelfTest(args.file, keep=args.keep, config=args.config, use_git=args.git,
+                    matlabroot=args.matlabroot, mdl=args.mdl).run()
 
 
 # ---------------------------------------------------------------------------
@@ -1503,6 +1615,11 @@ ATTR_LINES = [
 ]
 
 
+def mlautomerge_path(matlabroot):
+    arch = "win64" if os.name == "nt" else ("maca64" if sys.platform == "darwin" else "glnxa64")
+    return os.path.join(matlabroot, "bin", arch, "mlAutoMerge" + (".bat" if os.name == "nt" else ""))
+
+
 def git_config_lines(script, python, matlabroot):
     driver = '"%s" "%s" merge %%O %%A %%B -L %%L -P %%P' % (python, script)
     textconv = '"%s" "%s" diff' % (python, script)
@@ -1515,8 +1632,7 @@ def git_config_lines(script, python, matlabroot):
         ("diff.maps.textconv", textconv),
     ]
     if matlabroot:
-        arch = "win64" if os.name == "nt" else ("maca64" if sys.platform == "darwin" else "glnxa64")
-        exe = os.path.join(matlabroot, "bin", arch, "mlAutoMerge" + (".bat" if os.name == "nt" else ""))
+        exe = mlautomerge_path(matlabroot)
         lines.append(("merge.mlAutoMerge.name", "MathWorks automatic model merge"))
         lines.append(("merge.mlAutoMerge.driver", '"%s" %%O %%A %%B %%A' % exe))
     return lines
@@ -1619,6 +1735,10 @@ def build_parser():
     s.add_argument("file")
     s.add_argument("--keep", action="store_true", help="keep the temp work dir")
     s.add_argument("--config")
+    s.add_argument("--git", action="store_true",
+                   help="also build a throwaway git repository and run real git merge / diff / rebase through the driver")
+    s.add_argument("--matlabroot", help="also check that MathWorks mlAutoMerge exists under this MATLAB root")
+    s.add_argument("--mdl", help="with --matlabroot: run mlAutoMerge on three identical copies of this model")
     s.set_defaults(func=cmd_selftest)
 
     x = sub.add_parser("crosscheck", help="compare Simulink model structure with MAPS network records")
