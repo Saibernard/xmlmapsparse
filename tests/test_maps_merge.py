@@ -635,7 +635,8 @@ class TestCommandLine(unittest.TestCase):
         self.assertIn("parameter_value", out)
         self.assertIn("version 71219", out)
         import json
-        cfg = json.load(open(cfgp))
+        with open(cfgp) as fh:
+            cfg = json.load(fh)
         self.assertEqual(cfg["keys"]["parameter_value"], 6)
         self.assertEqual(cfg["keys"]["conf_group_object"], 2)
         # the written config is accepted back
@@ -1057,6 +1058,193 @@ class TestCrosscheck(unittest.TestCase):
         code, out, err = self.run_cli("crosscheck", p, self.maps_ok)
         self.assertEqual(code, 2)
         self.assertIn("cannot", err)
+
+
+
+# ---------------------------------------------------------------------------
+# MATLAB wiring: Kerberos preload and the merge window (stand-in MATLAB tools)
+# ---------------------------------------------------------------------------
+
+FAKE_AUTO = """#!/bin/sh
+echo "auto LD_PRELOAD=$LD_PRELOAD argc=$#" >> "%(log)s"
+exit ${FAKE_AUTOMERGE_EXIT:-0}
+"""
+
+FAKE_GUI = """#!/bin/sh
+echo "gui LD_PRELOAD=$LD_PRELOAD argc=$# merged=$4" >> "%(log)s"
+sleep 1
+echo "resolved by fake mlMerge" >> "$4"
+exit 0
+"""
+
+
+def make_fake_matlab(root, arch="glnxa64", lib="libkrb5support.so.0", libdir=("bin",), tools=True):
+    """A folder that looks like a MATLAB install to maps_merge.py. The tools log
+    how they were started to calls.log."""
+    bindir = os.path.join(root, "bin", arch)
+    os.makedirs(bindir)
+    if lib:
+        d = os.path.join(root, *(libdir + (arch,)))
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        open(os.path.join(d, lib), "w").close()
+    log = os.path.join(root, "calls.log")
+    if tools:
+        for name, body in (("mlAutoMerge", FAKE_AUTO), ("mlMerge", FAKE_GUI)):
+            path = os.path.join(bindir, name)
+            with open(path, "w") as fh:
+                fh.write(body % {"log": log})
+            os.chmod(path, 0o755)
+    return log
+
+
+class TestMatlabWiring(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.ml = os.path.join(self.d, "MATLAB", "R2024b")
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def cli(self, args, cwd=None, env=None):
+        full_env = dict(os.environ)
+        if env:
+            full_env.update(env)
+        proc = subprocess.Popen([PY, SCRIPT] + args, cwd=cwd, env=full_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        return proc.returncode, out
+
+    # -- finding MATLAB's libkrb5support ----------------------------------------
+    def test_preload_found_in_bin(self):
+        make_fake_matlab(self.ml)
+        lib = os.path.join(self.ml, "bin", "glnxa64", "libkrb5support.so.0")
+        self.assertEqual(mm.find_krb5_preload(self.ml, "glnxa64"), lib)
+
+    def test_preload_found_in_sys_os(self):
+        make_fake_matlab(self.ml, lib="libkrb5support.so.0.1", libdir=("sys", "os"))
+        self.assertEqual(mm.find_krb5_preload(self.ml, "glnxa64"),
+                         os.path.join(self.ml, "sys", "os", "glnxa64", "libkrb5support.so.0.1"))
+
+    def test_no_preload_off_linux_or_when_missing(self):
+        make_fake_matlab(self.ml)
+        self.assertIsNone(mm.find_krb5_preload(self.ml, "win64"))
+        self.assertIsNone(mm.find_krb5_preload(self.ml, "maca64"))
+        other = os.path.join(self.d, "other")
+        make_fake_matlab(other, lib=None)
+        self.assertIsNone(mm.find_krb5_preload(other, "glnxa64"))
+
+    # -- the git config lines ---------------------------------------------------
+    def test_config_lines_linux_with_preload(self):
+        lines = dict(mm.git_config_lines("/s/maps_merge.py", "/usr/bin/python", "/ml", "glnxa64", "/ml/k.so"))
+        self.assertEqual(lines["merge.mlAutoMerge.driver"],
+                         'env LD_PRELOAD="/ml/k.so" "/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A')
+        self.assertEqual(lines["mergetool.mlMerge.cmd"],
+                         'env LD_PRELOAD="/ml/k.so" "/ml/bin/glnxa64/mlMerge" "$BASE" "$LOCAL" "$REMOTE" "$MERGED"')
+        self.assertNotIn("LD_PRELOAD", lines["merge.maps.driver"])       # MAPS never needs it
+        self.assertNotIn("LD_PRELOAD", lines["diff.maps.textconv"])
+
+    def test_config_lines_without_preload_and_on_windows(self):
+        lines = dict(mm.git_config_lines("/s/m.py", "py", "/ml", "glnxa64", None))
+        self.assertEqual(lines["merge.mlAutoMerge.driver"], '"/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A')
+        w = dict(mm.git_config_lines("/s/m.py", "py", "/ml", "win64", None))
+        self.assertIn("mlAutoMerge.bat", w["merge.mlAutoMerge.driver"])
+        self.assertIn("mlMerge.exe", w["mergetool.mlMerge.cmd"])
+        none = dict(mm.git_config_lines("/s/m.py", "py", None))
+        self.assertNotIn("merge.mlAutoMerge.driver", none)
+        self.assertNotIn("mergetool.mlMerge.cmd", none)
+
+    # -- the setup command --------------------------------------------------------
+    def test_setup_reports_preload(self):
+        make_fake_matlab(self.ml)
+        lib = os.path.join(self.ml, "bin", "glnxa64", "libkrb5support.so.0")
+        code, out = self.cli(["setup", "--matlabroot", self.ml, "--matlab-arch", "glnxa64"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("will start with LD_PRELOAD=%s" % lib, out)
+        self.assertIn("git config mergetool.mlMerge.cmd", out)
+        self.assertIn("git mergetool --tool=mlMerge", out)
+        self.assertNotIn("WARNING", out)
+        code, out = self.cli(["setup", "--matlabroot", self.ml, "--matlab-arch", "glnxa64", "--no-preload"])
+        self.assertNotIn("LD_PRELOAD", out)
+        code, out = self.cli(["setup", "--matlabroot", self.ml, "--matlab-arch", "glnxa64",
+                              "--preload", "/does/not/exist.so"])
+        self.assertIn("WARNING: preload library not found", out)
+
+    def test_setup_warns_about_missing_tools(self):
+        make_fake_matlab(self.ml, tools=False)
+        code, out = self.cli(["setup", "--matlabroot", self.ml, "--matlab-arch", "glnxa64"])
+        self.assertIn("WARNING: mlAutoMerge not found", out)
+        self.assertIn("WARNING: mlMerge not found", out)
+
+    # -- selftest starts mlAutoMerge the way git will -------------------------------
+    def test_selftest_uses_preload(self):
+        log = make_fake_matlab(self.ml)
+        lib = os.path.join(self.ml, "bin", "glnxa64", "libkrb5support.so.0")
+        maps = os.path.join(self.d, "x.MAPS")
+        mm.write_text(maps, gen_maps.gen())
+        mdl = os.path.join(self.d, "m.mdl")
+        mm.write_text(mdl, "Model {\n}\n")
+        code, out = self.cli(["selftest", maps, "--matlabroot", self.ml, "--matlab-arch", "glnxa64", "--mdl", mdl])
+        self.assertEqual(code, 0, out)
+        self.assertIn("auto LD_PRELOAD=%s argc=4" % lib, mm.read_text(log))
+
+    # -- the real thing: git merge and git mergetool through the config -------------
+    def test_git_merge_and_mergetool_start_matlab_tools_with_preload(self):
+        log = make_fake_matlab(self.ml)
+        lib = os.path.join(self.ml, "bin", "glnxa64", "libkrb5support.so.0")
+        repo = os.path.join(self.d, "repo")
+        os.makedirs(repo)
+
+        def g(*args, **kw):
+            env = dict(os.environ)
+            env.update(kw.get("env", {}))
+            with open(os.devnull) as devnull:
+                proc = subprocess.Popen(["git"] + list(args), cwd=repo, env=env, stdin=devnull,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                out = proc.communicate()[0].decode("latin-1")
+            return proc.returncode, out
+
+        g("init", "-q")
+        g("config", "user.email", "t@example.com")
+        g("config", "user.name", "tester")
+        g("config", "commit.gpgsign", "false")
+        code, out = self.cli(["setup", "--apply", "--local-attributes", "--matlabroot", self.ml,
+                              "--matlab-arch", "glnxa64"], cwd=repo)
+        self.assertEqual(code, 0, out)
+        code, out = g("check-attr", "merge", "--", "RQxSV.mdl")
+        self.assertIn("merge: mlAutoMerge", out)
+
+        mdl = os.path.join(repo, "RQxSV.mdl")
+        mm.write_text(mdl, "base\n")
+        g("add", "-A")
+        g("commit", "-q", "-m", "base")
+        g("checkout", "-q", "-b", "temp")
+        mm.write_text(mdl, "temp change\n")
+        g("commit", "-q", "-am", "temp")
+        g("checkout", "-q", "-")
+        g("checkout", "-q", "-b", "mergetest")
+        mm.write_text(mdl, "my change\n")
+        g("commit", "-q", "-am", "mine")
+
+        # 1. automatic merge succeeds: git started mlAutoMerge with the preload
+        code, out = g("merge", "--no-edit", "temp")
+        self.assertEqual(code, 0, out)
+        self.assertIn("auto LD_PRELOAD=%s argc=4" % lib, mm.read_text(log))
+        g("reset", "-q", "--hard", "ORIG_HEAD")
+
+        # 2. automatic merge gives up: conflict, then the merge window resolves it
+        code, out = g("merge", "--no-edit", "temp", env={"FAKE_AUTOMERGE_EXIT": "1"})
+        self.assertNotEqual(code, 0, out)
+        code, status = g("status", "--porcelain")
+        self.assertIn("RQxSV.mdl", status)
+        code, out = g("mergetool", "--tool=mlMerge", "-y", "--", "RQxSV.mdl")
+        self.assertEqual(code, 0, out)
+        gui = [l for l in mm.read_text(log).split("\n") if l.startswith("gui ")]
+        self.assertEqual(len(gui), 1, mm.read_text(log))
+        self.assertIn("LD_PRELOAD=%s argc=4 merged=RQxSV.mdl" % lib, gui[0])
+        code, status = g("status", "--porcelain")
+        self.assertIn("M  RQxSV.mdl", status)          # resolved and staged
+        self.assertIn("resolved by fake mlMerge", mm.read_text(mdl))
 
 
 if __name__ == "__main__":

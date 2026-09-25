@@ -252,7 +252,20 @@ try
     g(repo, 'config commit.gpgsign false');
     g(repo, 'config merge.maps.driver', [q '"' py '" "' mapsMergePy '" merge %O %A %B -L %L -P %P' q]);
     g(repo, 'config merge.maps.recursive binary');
-    g(repo, 'config merge.mlAutoMerge.driver', [q '"' exe '" %O %A %B %A' q]);
+    % same Kerberos fix as `maps_merge.py setup`: git starts the tool from a plain
+    % shell, where RHEL8 otherwise fails with "libkrb5.so.3: undefined symbol"
+    pre = '';
+    if isunix && ~ismac
+        for d = {fullfile(matlabroot, 'bin', computer('arch')), fullfile(matlabroot, 'sys', 'os', computer('arch'))}
+            f = dir(fullfile(d{1}, 'libkrb5support.so*'));
+            if ~isempty(f)
+                pre = ['env LD_PRELOAD="' fullfile(d{1}, f(1).name) '" '];
+                say('git will start mlAutoMerge with LD_PRELOAD=%s', fullfile(d{1}, f(1).name));
+                break
+            end
+        end
+    end
+    g(repo, 'config merge.mlAutoMerge.driver', [q pre '"' exe '" %O %A %B %A' q]);
     fid = fopen(fullfile(repo, '.gitattributes'), 'w');
     fprintf(fid, '*.MAPS merge=maps diff=maps\n*.mdl binary merge=mlAutoMerge\n');
     fclose(fid);

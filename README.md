@@ -30,6 +30,14 @@ Python 2.7 and Python 3.x. Nothing is installed.
    textconv, and `merge.maps.recursive=binary` so criss-cross merges work)
    and writes the attribute lines to `.git/info/attributes`. Both are local to your clone. To see the
    lines without applying them, drop `--apply`.
+
+   With `--matlabroot` it also registers MathWorks' `mlAutoMerge` as the
+   model merge driver and `mlMerge` as the merge window. On Linux it finds
+   MATLAB's own `libkrb5support` and starts both tools with it preloaded.
+   Without that, on RHEL8 the tools crash when Git starts them, with
+   `libkrb5.so.3: undefined symbol: k5_buf_cstring`, and every model merge
+   stops as a conflict. No wrapper scripts are needed. Use `--preload PATH`
+   to name a different library, or `--no-preload` to turn it off.
 3. Check that Git now routes the files:
 
        git check-attr merge diff -- path/to/RQxSV.MAPS
@@ -145,9 +153,15 @@ if wanted.
 ## MDL, XML and the crosscheck
 
 * MDL files saved by R2024b are MathWorks OPC text packages. They must never be
-  text-merged. The attribute line routes them to `mlAutoMerge`, which merges at
-  subsystem level and opens the Three-Way Merge tool when the same subsystem
-  changed on both sides.
+  text-merged. The attribute line routes them to `mlAutoMerge`, which merges
+  automatically when the two sides changed different subsystems. When the same
+  subsystem changed on both sides, Git stops and reports the model as
+  conflicted. Open the Three-Way Merge window with
+
+      git mergetool --tool=mlMerge -- path/to/RQxSV.mdl
+
+  pick Mine or Theirs for each conflicted row, blocks before lines, then
+  Accept & Close, then `git add` the model and commit.
 * The XML produced by the SGM-to-XML converter is generated. Do not merge it.
   Merge the MDL, rerun the converter, re-import into MAPS.
 * After a merge that touched both the model and the MAPS file, run

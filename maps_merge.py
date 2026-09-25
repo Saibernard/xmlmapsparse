@@ -17,7 +17,10 @@ Commands
   crosscheck MDL MAPS       Compare Simulink model structure with MAPS network
                             records. Reads R2024b text-package MDL, classic MDL,
                             and SLX.
-  setup                     Print (or apply) the Git configuration lines.
+  setup                     Print (or apply) the Git configuration lines. With
+                            --matlabroot it also wires MathWorks' model merge
+                            (mlAutoMerge) and merge window (mlMerge), and on
+                            Linux fixes their Kerberos library clash.
 
 Run  python maps_merge.py <command> -h  for the options of a command.
 
@@ -64,7 +67,7 @@ import tempfile
 import time
 from collections import OrderedDict
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 PY2 = sys.version_info[0] == 2
 
 # ---------------------------------------------------------------------------
@@ -933,8 +936,10 @@ def cmd_check(args):
 
 class SelfTest(object):
     def __init__(self, path, keep=False, config=None, verbose=True, use_git=False,
-                 matlabroot=None, mdl=None):
+                 matlabroot=None, mdl=None, preload=None, arch=None):
         self.src = path
+        self.preload = preload
+        self.arch = arch
         self.keep = keep
         self.cfg = load_config(config)
         self.verbose = verbose
@@ -1231,10 +1236,18 @@ class SelfTest(object):
         self.log(code == 0 and l1 in merged and l2 in merged, "git rebase: uses the driver too")
 
     def run_matlab_suite(self):
-        exe = mlautomerge_path(self.matlabroot)
+        exe = mlautomerge_path(self.matlabroot, self.arch)
         self.log(os.path.isfile(exe), "MathWorks mlAutoMerge present", exe)
+        gui = matlab_tool_path(self.matlabroot, "mlMerge", self.arch)
+        self.log(os.path.isfile(gui), "MathWorks mlMerge (merge window) present", gui)
         if not os.path.isfile(exe):
             return
+        preload = self.preload or find_krb5_preload(self.matlabroot, self.arch)
+        env = dict(os.environ)
+        if preload:
+            env["LD_PRELOAD"] = preload
+            if self.verbose:
+                print("starting mlAutoMerge with LD_PRELOAD=%s, as git will" % preload)
         if not self.mdl:
             self.log(True, "mlAutoMerge run on a model (skipped, pass --mdl MODEL.mdl to try it)")
             return
@@ -1247,7 +1260,7 @@ class SelfTest(object):
         original = read_text(copies[1])
         try:
             proc = subprocess.Popen([exe, copies[0], copies[1], copies[2], copies[1]],
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
             out = proc.communicate()[0]
             if not PY2:
                 out = out.decode("latin-1", "replace")
@@ -1278,7 +1291,8 @@ def cmd_selftest(args):
         eprint("maps_merge: %s" % exc)
         return 2
     return SelfTest(args.file, keep=args.keep, config=args.config, use_git=args.git,
-                    matlabroot=args.matlabroot, mdl=args.mdl).run()
+                    matlabroot=args.matlabroot, mdl=args.mdl, preload=args.preload,
+                    arch=args.matlab_arch).run()
 
 
 # ---------------------------------------------------------------------------
@@ -1615,12 +1629,64 @@ ATTR_LINES = [
 ]
 
 
-def mlautomerge_path(matlabroot):
-    arch = "win64" if os.name == "nt" else ("maca64" if sys.platform == "darwin" else "glnxa64")
-    return os.path.join(matlabroot, "bin", arch, "mlAutoMerge" + (".bat" if os.name == "nt" else ""))
+def matlab_arch(arch=None):
+    """MATLAB's name for this platform's binary folder."""
+    if arch:
+        return arch
+    if os.name == "nt":
+        return "win64"
+    if sys.platform == "darwin":
+        return "maca64"
+    return "glnxa64"
 
 
-def git_config_lines(script, python, matlabroot):
+def matlab_tool_path(matlabroot, tool, arch=None):
+    """Path of mlAutoMerge or mlMerge inside a MATLAB installation."""
+    arch = matlab_arch(arch)
+    if arch.startswith("win"):
+        tool += ".bat" if tool == "mlAutoMerge" else ".exe"
+    return os.path.join(matlabroot, "bin", arch, tool)
+
+
+def mlautomerge_path(matlabroot, arch=None):
+    return matlab_tool_path(matlabroot, "mlAutoMerge", arch)
+
+
+def find_krb5_preload(matlabroot, arch=None):
+    """On Linux, MATLAB's merge tools started from a plain shell (which is how
+    git starts them) can mix MATLAB's Kerberos libraries with the system ones
+    and crash before doing anything. On RHEL8 the error is
+        libkrb5.so.3: undefined symbol: k5_buf_cstring
+    Preloading MATLAB's own libkrb5support fixes it. Returns that library's
+    path, or None when not on Linux or when MATLAB does not ship one."""
+    arch = matlab_arch(arch)
+    if not arch.startswith("glnx") or not matlabroot:
+        return None
+    for folder in (os.path.join(matlabroot, "bin", arch),
+                   os.path.join(matlabroot, "sys", "os", arch)):
+        exact = os.path.join(folder, "libkrb5support.so.0")
+        if os.path.isfile(exact):
+            return exact
+        try:
+            names = sorted(n for n in os.listdir(folder) if n.startswith("libkrb5support.so"))
+        except OSError:
+            continue
+        for n in names:
+            if os.path.isfile(os.path.join(folder, n)):
+                return os.path.join(folder, n)
+    return None
+
+
+def with_preload(command, preload):
+    """Prefix a shell command so it runs with LD_PRELOAD set. git runs merge
+    drivers and mergetool commands through the shell, so this works inside
+    the git config value itself; no wrapper script is needed."""
+    if not preload:
+        return command
+    return 'env LD_PRELOAD="%s" %s' % (preload, command)
+
+
+def git_config_lines(script, python, matlabroot, arch=None, preload=None):
     driver = '"%s" "%s" merge %%O %%A %%B -L %%L -P %%P' % (python, script)
     textconv = '"%s" "%s" diff' % (python, script)
     lines = [
@@ -1632,16 +1698,41 @@ def git_config_lines(script, python, matlabroot):
         ("diff.maps.textconv", textconv),
     ]
     if matlabroot:
-        exe = mlautomerge_path(matlabroot)
+        auto = matlab_tool_path(matlabroot, "mlAutoMerge", arch)
+        gui = matlab_tool_path(matlabroot, "mlMerge", arch)
         lines.append(("merge.mlAutoMerge.name", "MathWorks automatic model merge"))
-        lines.append(("merge.mlAutoMerge.driver", '"%s" %%O %%A %%B %%A' % exe))
+        lines.append(("merge.mlAutoMerge.driver",
+                      with_preload('"%s" %%O %%A %%B %%A' % auto, preload)))
+        # the Three-Way Merge window, for model conflicts:
+        #   git mergetool --tool=mlMerge -- path/to/model.mdl
+        lines.append(("mergetool.mlMerge.cmd",
+                      with_preload('"%s" "$BASE" "$LOCAL" "$REMOTE" "$MERGED"' % gui, preload)))
     return lines
 
 
 def cmd_setup(args):
     script = os.path.abspath(__file__)
     python = args.python or sys.executable
-    lines = git_config_lines(script, python, args.matlabroot)
+    arch = matlab_arch(args.matlab_arch)
+    preload = None
+    if args.matlabroot:
+        for tool in ("mlAutoMerge", "mlMerge"):
+            path = matlab_tool_path(args.matlabroot, tool, arch)
+            if not os.path.isfile(path):
+                print("# WARNING: %s not found at %s" % (tool, path))
+        if args.preload:
+            preload = args.preload
+            if not os.path.isfile(preload):
+                print("# WARNING: preload library not found: %s" % preload)
+        elif not args.no_preload:
+            preload = find_krb5_preload(args.matlabroot, arch)
+        if preload:
+            print("# MATLAB merge tools will start with LD_PRELOAD=%s" % preload)
+            print("#   (fixes 'libkrb5.so.3: undefined symbol: k5_buf_cstring' on RHEL8)")
+        elif arch.startswith("glnx") and not args.no_preload:
+            print("# note: no libkrb5support found in this MATLAB, tools start without a preload")
+        print("")
+    lines = git_config_lines(script, python, args.matlabroot, arch, preload)
     print("# 1. Attributes. For a private trial put these in .git/info/attributes")
     print("#    of your clone. For the whole team put them in .gitattributes and commit,")
     print("#    replacing (or placed after) any existing '*.MAPS binary' / '*.mdl binary' line.")
@@ -1652,7 +1743,10 @@ def cmd_setup(args):
     for k, v in lines:
         print('git config %s %s' % (k, _sh_quote(v)))
     if not args.matlabroot:
-        print("# (add --matlabroot /path/to/MATLAB/R2024b to also print the MDL merge driver line)")
+        print("# (add --matlabroot /path/to/MATLAB/R2024b to also print the MDL merge lines)")
+    else:
+        print("# When a model conflicts, open the merge window with:")
+        print("#   git mergetool --tool=mlMerge -- path/to/model.mdl")
     if not args.apply:
         return 0
     print("")
@@ -1739,6 +1833,8 @@ def build_parser():
                    help="also build a throwaway git repository and run real git merge / diff / rebase through the driver")
     s.add_argument("--matlabroot", help="also check that MathWorks mlAutoMerge exists under this MATLAB root")
     s.add_argument("--mdl", help="with --matlabroot: run mlAutoMerge on three identical copies of this model")
+    s.add_argument("--preload", help="library to LD_PRELOAD for mlAutoMerge (default: found automatically)")
+    s.add_argument("--matlab-arch", help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_selftest)
 
     x = sub.add_parser("crosscheck", help="compare Simulink model structure with MAPS network records")
@@ -1758,7 +1854,11 @@ def build_parser():
     u.add_argument("--global", dest="global_", action="store_true", help="with --apply: use git config --global")
     u.add_argument("--local-attributes", action="store_true",
                    help="with --apply: also write the attribute lines to .git/info/attributes")
-    u.add_argument("--matlabroot", help="MATLAB install root, to include the mlAutoMerge driver")
+    u.add_argument("--matlabroot", help="MATLAB install root, to include the MathWorks model merge tools")
+    u.add_argument("--preload", help="library to LD_PRELOAD for the MATLAB tools "
+                                     "(default on Linux: MATLAB's own libkrb5support, found automatically)")
+    u.add_argument("--no-preload", action="store_true", help="start the MATLAB tools without a preload")
+    u.add_argument("--matlab-arch", help=argparse.SUPPRESS)
     u.add_argument("--python", help="python interpreter to put in the driver command (default: this one)")
     u.set_defaults(func=cmd_setup)
     return p
