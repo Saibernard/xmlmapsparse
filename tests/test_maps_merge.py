@@ -1149,7 +1149,7 @@ class TestMatlabWiring(unittest.TestCase):
         self.assertEqual(lines["merge.mlAutoMerge.driver"], '"/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A')
         w = dict(mm.git_config_lines("/s/m.py", "py", "/ml", "win64", None))
         self.assertIn("mlAutoMerge.bat", w["merge.mlAutoMerge.driver"])
-        self.assertIn("mlMerge.exe", w["mergetool.mlMerge.cmd"])
+        self.assertIn("mlMerge.bat", w["mergetool.mlMerge.cmd"])     # MathWorks' own name
         none = dict(mm.git_config_lines("/s/m.py", "py", None))
         self.assertNotIn("merge.mlAutoMerge.driver", none)
         self.assertNotIn("mergetool.mlMerge.cmd", none)
@@ -1245,6 +1245,100 @@ class TestMatlabWiring(unittest.TestCase):
         code, status = g("status", "--porcelain")
         self.assertIn("M  RQxSV.mdl", status)          # resolved and staged
         self.assertIn("resolved by fake mlMerge", mm.read_text(mdl))
+        self.assertFalse(os.path.exists(mdl + ".orig"))  # mergetool.keepBackup=false
+        self.assertNotIn(".orig", status)
+
+
+
+class TestAttributeSafety(unittest.TestCase):
+    """An attribute naming a merge driver that is not configured makes Git
+    text-merge the file silently. setup must never create that situation."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.repo = os.path.join(self.d, "repo")
+        os.makedirs(self.repo)
+        self.git("init", "-q")
+        self.ml = os.path.join(self.d, "MATLAB", "R2024b")
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def git(self, *args):
+        proc = subprocess.Popen(["git"] + list(args), cwd=self.repo,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        return proc.returncode, out
+
+    def setup(self, *extra):
+        proc = subprocess.Popen([PY, SCRIPT, "setup", "--apply", "--local-attributes"] + list(extra),
+                                cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        return proc.returncode, out
+
+    def attributes(self):
+        return mm.read_text(os.path.join(self.repo, ".git", "info", "attributes"))
+
+    def assert_every_named_driver_configured(self):
+        for name in mm.merge_driver_names(self.attributes()):
+            code, out = self.git("config", "--get", "merge.%s.driver" % name)
+            self.assertEqual(code, 0, "attributes name merge=%s but no driver is configured" % name)
+
+    def test_without_matlabroot_no_model_lines(self):
+        code, out = self.setup()
+        self.assertEqual(code, 0, out)
+        attrs = self.attributes()
+        self.assertIn("*.MAPS merge=maps diff=maps", attrs)
+        self.assertNotIn("mlAutoMerge", attrs)
+        self.assertNotIn("*.mdl", out)                 # not even printed
+        self.assert_every_named_driver_configured()
+        code, out = self.git("check-attr", "merge", "--", "m.mdl")
+        self.assertIn("merge: unspecified", out)
+
+    def test_with_matlabroot_model_lines_and_drivers(self):
+        make_fake_matlab(self.ml)
+        code, out = self.setup("--matlabroot", self.ml, "--matlab-arch", "glnxa64")
+        self.assertEqual(code, 0, out)
+        attrs = self.attributes()
+        self.assertIn("*.mdl binary merge=mlAutoMerge", attrs)
+        self.assertIn("*.slx binary merge=mlAutoMerge", attrs)
+        self.assert_every_named_driver_configured()
+        code, out = self.git("config", "--get", "mergetool.keepBackup")
+        self.assertEqual(out.strip(), "false")
+        self.assertNotIn("trustExitCode", out)
+        code, out = self.git("config", "--get", "mergetool.mlMerge.trustExitCode")
+        self.assertNotEqual(code, 0)                   # deliberately not set
+
+    def test_warns_about_stale_line_naming_missing_driver(self):
+        info = os.path.join(self.repo, ".git", "info")
+        if not os.path.isdir(info):
+            os.makedirs(info)
+        mm.write_text(os.path.join(info, "attributes"), "*.mdl binary merge=mlAutoMerge")   # no newline
+        code, out = self.setup()
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge driver 'mlAutoMerge', which is not configured", out)
+        attrs = self.attributes()
+        self.assertIn("*.mdl binary merge=mlAutoMerge\n*.MAPS merge=maps diff=maps", attrs)  # line kept intact
+        # rerunning with --matlabroot configures it and clears the warning
+        make_fake_matlab(self.ml)
+        code, out = self.setup("--matlabroot", self.ml, "--matlab-arch", "glnxa64")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+
+    def test_setup_is_idempotent(self):
+        make_fake_matlab(self.ml)
+        self.setup("--matlabroot", self.ml, "--matlab-arch", "glnxa64")
+        first = self.attributes()
+        self.setup("--matlabroot", self.ml, "--matlab-arch", "glnxa64")
+        self.assertEqual(self.attributes(), first)
+
+    def test_merge_driver_names(self):
+        text = "# *.x merge=commented\n*.MAPS merge=maps diff=maps\n*.a merge=binary\n*.b merge=text\n*.mdl binary merge=mlAutoMerge\n*.c merge=maps\n"
+        self.assertEqual(mm.merge_driver_names(text), ["maps", "mlAutoMerge"])
+
+    def test_mac_arch_names(self):
+        self.assertIn(mm.matlab_arch(), ("maca64", "maci64", "glnxa64", "win64"))
+        self.assertEqual(mm.matlab_arch("maci64"), "maci64")
 
 
 if __name__ == "__main__":

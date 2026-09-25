@@ -1,9 +1,15 @@
-# Merge and diff rules for the servo-group repo.
-# For a private trial, put these lines in .git/info/attributes of your own clone
-# (they override the committed .gitattributes for you only).
-# For the whole team, replace the "*.MAPS binary" and "*.mdl binary" lines in the
-# committed .gitattributes with these.
-*.MAPS        merge=maps diff=maps
-*.MAPS.static binary
-*.mdl         binary merge=mlAutoMerge
-*.slx         binary merge=mlAutoMerge
+# What `maps_merge.py setup --apply --local-attributes` writes into
+# .git/info/attributes of ONE clone. It overrides the committed .gitattributes
+# for that clone only.
+#
+# Do NOT put these lines in the shared, committed .gitattributes. When an
+# attribute names a merge driver that is not configured, Git does a plain
+# line-by-line text merge, not "binary, pick a side". Anyone who has not run
+# setup would then get MAPS files and models text-merged without warning.
+#
+# The model lines are only valid together with the mlAutoMerge driver, which
+# setup configures when it is given --matlabroot.
+*.MAPS merge=maps diff=maps
+*.maps merge=maps diff=maps
+*.mdl  binary merge=mlAutoMerge
+*.slx  binary merge=mlAutoMerge

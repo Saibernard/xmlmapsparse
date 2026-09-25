@@ -13,7 +13,7 @@ Python 2.7 and Python 3.x. Nothing is installed.
 | file | purpose |
 |---|---|
 | `maps_merge.py` | the tool (merge driver, diff, inspect, check, selftest, crosscheck, setup) |
-| `.gitattributes.example` | the attribute lines that route files to the merge drivers |
+| `.gitattributes.example` | the attribute lines `setup` writes into one clone's `.git/info/attributes` |
 | `maps_merge.json.example` | optional key configuration, only needed if `inspect` shows a wrong key |
 | `tests/` | test suite, run with `python -m unittest discover -s tests` |
 | `test_mdl_merge.m` | optional MATLAB script that exercises `mlAutoMerge` on throwaway copies of a model |
@@ -57,9 +57,17 @@ Python 2.7 and Python 3.x. Nothing is installed.
 6. Merge something real: two branches that both changed the same MAPS file,
    then `git merge` or `git pull`. Open the result in the MAPS editor.
 
-To undo the trial: `git config --unset merge.maps.driver` (and the other
-`merge.maps.*`, `diff.maps.*`, `merge.mlAutoMerge.*` keys) and delete
-`.git/info/attributes`.
+To undo the trial, delete `.git/info/attributes` first, then remove the
+settings:
+
+    git config --remove-section merge.maps
+    git config --remove-section diff.maps
+    git config --remove-section merge.mlAutoMerge
+    git config --remove-section mergetool.mlMerge
+    git config --unset mergetool.keepBackup
+
+Delete the attributes file first: an attribute that names a driver you have
+already removed makes Git text-merge that file.
 
 ## Proving the whole thing in one go
 
@@ -85,16 +93,27 @@ What it checks:
 
 ## Team rollout
 
-1. Commit `maps_merge.py` into the repo (for example under `tools/`).
-2. In the committed `.gitattributes`, replace `*.MAPS binary` and `*.mdl binary`
-   with the lines from `.gitattributes.example`. If you keep the old lines, the
-   new ones must come after them: for Git the last matching line wins.
-3. Every engineer runs once per clone:
+1. Put `maps_merge.py` where everyone can reach it, for example committed under
+   `tools/` in the repo.
+2. Every engineer runs, once per clone:
 
-       python tools/maps_merge.py setup --apply --matlabroot /path/to/MATLAB/R2024b
+       python tools/maps_merge.py setup --apply --local-attributes --matlabroot /path/to/MATLAB/R2024b
 
-Anyone who has not run step 3 keeps today's behaviour (Git refuses to merge and
-they pick a side), so the rollout can be gradual.
+3. Leave the committed `.gitattributes` exactly as it is, with `*.MAPS binary`
+   and `*.mdl binary`.
+
+Do not copy the attribute lines into the committed `.gitattributes`. When an
+attribute names a merge driver that is not configured, Git does not refuse the
+merge. It does a plain line-by-line text merge, without any warning. Anyone who
+had not run setup would get their MAPS files and models text-merged, and a
+text-merged R2024b model can be silently broken.
+
+Keeping the lines per clone makes the rollout safe and gradual. Anyone who has
+not run step 2 keeps today's behaviour: Git refuses to merge and they pick a
+side. `setup` also checks that every merge driver named in the clone's
+attributes file is configured, and warns if one is not. It only writes the
+model lines when `--matlabroot` is given, because that is when it configures
+`mlAutoMerge`.
 
 ## What happens on a merge
 
@@ -161,7 +180,10 @@ if wanted.
       git mergetool --tool=mlMerge -- path/to/RQxSV.mdl
 
   pick Mine or Theirs for each conflicted row, blocks before lines, then
-  Accept & Close, then `git add` the model and commit.
+  Accept & Close. `git mergetool` stages the model when the window saved it.
+  If you close the window without accepting, Git asks whether the merge was
+  successful. Answer `n`, and the model stays unresolved. `setup` turns off
+  `mergetool`'s `.orig` backup copies; Git keeps every version anyway.
 * The XML produced by the SGM-to-XML converter is generated. Do not merge it.
   Merge the MDL, rerun the converter, re-import into MAPS.
 * After a merge that touched both the model and the MAPS file, run

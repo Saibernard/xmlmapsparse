@@ -67,7 +67,7 @@ import tempfile
 import time
 from collections import OrderedDict
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 PY2 = sys.version_info[0] == 2
 
 # ---------------------------------------------------------------------------
@@ -1189,7 +1189,7 @@ class SelfTest(object):
         git("config", "commit.gpgsign", "false")
         git("checkout", "-q", "-b", "base")
         write_text(fpath, base_text)
-        write_text(os.path.join(repo, ".gitattributes"), "\n".join(ATTR_LINES) + "\n")
+        write_text(os.path.join(repo, ".gitattributes"), "\n".join(ATTR_MAPS) + "\n")
         for k, v in git_config_lines(os.path.abspath(__file__), sys.executable, None):
             git("config", k, v)
         git("add", ".")
@@ -1621,12 +1621,35 @@ def cmd_crosscheck(args):
 # setup
 # ---------------------------------------------------------------------------
 
-ATTR_LINES = [
+ATTR_MAPS = [
     "*.MAPS merge=maps diff=maps",
     "*.maps merge=maps diff=maps",
+]
+ATTR_MDL = [
     "*.mdl binary merge=mlAutoMerge",
     "*.slx binary merge=mlAutoMerge",
 ]
+# Git treats an attribute that names a merge driver which is NOT configured as
+# a plain line-by-line text merge, not as "binary, pick a side". So a line is
+# only ever written together with the driver it names, and only into the
+# clone's own .git/info/attributes, never into the shared .gitattributes.
+BUILTIN_MERGE = ("text", "binary", "union")
+
+
+def attr_lines(with_mdl):
+    return ATTR_MAPS + (ATTR_MDL if with_mdl else [])
+
+
+def merge_driver_names(attr_text):
+    """Names of the merge drivers an attributes file refers to."""
+    names = []
+    for line in attr_text.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue            # only whole-line comments exist in attributes files
+        for tok in line.split()[1:]:
+            if tok.startswith("merge=") and tok[6:] not in BUILTIN_MERGE and tok[6:] not in names:
+                names.append(tok[6:])
+    return names
 
 
 def matlab_arch(arch=None):
@@ -1636,7 +1659,8 @@ def matlab_arch(arch=None):
     if os.name == "nt":
         return "win64"
     if sys.platform == "darwin":
-        return "maca64"
+        import platform
+        return "maca64" if platform.machine() == "arm64" else "maci64"
     return "glnxa64"
 
 
@@ -1644,7 +1668,7 @@ def matlab_tool_path(matlabroot, tool, arch=None):
     """Path of mlAutoMerge or mlMerge inside a MATLAB installation."""
     arch = matlab_arch(arch)
     if arch.startswith("win"):
-        tool += ".bat" if tool == "mlAutoMerge" else ".exe"
+        tool += ".bat"          # MathWorks: mlDiff.bat, mlMerge.bat, mlAutoMerge.bat
     return os.path.join(matlabroot, "bin", arch, tool)
 
 
@@ -1707,6 +1731,9 @@ def git_config_lines(script, python, matlabroot, arch=None, preload=None):
         #   git mergetool --tool=mlMerge -- path/to/model.mdl
         lines.append(("mergetool.mlMerge.cmd",
                       with_preload('"%s" "$BASE" "$LOCAL" "$REMOTE" "$MERGED"' % gui, preload)))
+        # git mergetool otherwise leaves a MODEL.mdl.orig copy behind after each
+        # resolution; Git already keeps every version, so the copy adds nothing
+        lines.append(("mergetool.keepBackup", "false"))
     return lines
 
 
@@ -1733,10 +1760,11 @@ def cmd_setup(args):
             print("# note: no libkrb5support found in this MATLAB, tools start without a preload")
         print("")
     lines = git_config_lines(script, python, args.matlabroot, arch, preload)
-    print("# 1. Attributes. For a private trial put these in .git/info/attributes")
-    print("#    of your clone. For the whole team put them in .gitattributes and commit,")
-    print("#    replacing (or placed after) any existing '*.MAPS binary' / '*.mdl binary' line.")
-    for l in ATTR_LINES:
+    wanted = attr_lines(bool(args.matlabroot))
+    print("# 1. Attributes, for .git/info/attributes of THIS clone (--local-attributes does it).")
+    print("#    Never put them in the shared .gitattributes: for anyone who has not run setup,")
+    print("#    Git would silently text-merge these files instead of refusing as it does today.")
+    for l in wanted:
         print(l)
     print("")
     print("# 2. Git config, once per clone (or add --global):")
@@ -1775,10 +1803,29 @@ def cmd_setup(args):
         attr = os.path.join(info, "attributes")
         existing = read_text(attr) if os.path.exists(attr) else ""
         with open(attr, "ab") as fh:
-            for l in ATTR_LINES:
+            if existing and not existing.endswith("\n"):
+                fh.write(to_bytes("\n"))
+            for l in wanted:
                 if l not in existing.split("\n"):
                     fh.write(to_bytes(l + "\n"))
         print("ok  wrote %s" % attr)
+        # every driver the attributes name must exist, or Git text-merges those files
+        missing = []
+        for name in merge_driver_names(read_text(attr)):
+            try:
+                with open(os.devnull, "w") as devnull:
+                    code = subprocess.call(["git", "config", "--get", "merge.%s.driver" % name],
+                                           stdout=devnull, stderr=devnull)
+            except OSError:
+                code = 1
+            if code != 0:
+                missing.append(name)
+        for name in missing:
+            print("WARNING %s routes files to merge driver '%s', which is not configured." % (attr, name))
+            print("        Git would text-merge those files. Rerun setup with --matlabroot,")
+            print("        or delete the lines containing merge=%s from that file." % name)
+        if missing:
+            return 1
     return 0
 
 
