@@ -181,6 +181,12 @@ if wanted.
 
   pick Mine or Theirs for each conflicted row, blocks before lines, then
   Accept & Close. `git mergetool` stages the model when the window saved it.
+
+  **Careful:** when the model did not merge automatically, the file in your
+  folder is only your version, with no conflict markers, so it looks normal.
+  `git status` lists it as unmerged. If you `git add` it without opening the
+  merge window, the other side's model changes are lost. The terminal shows a
+  `MODEL NOT MERGED AUTOMATICALLY` warning with the exact command to run.
   If you close the window without accepting, Git asks whether the merge was
   successful. Answer `n`, and the model stays unresolved. `setup` turns off
   `mergetool`'s `.orig` backup copies; Git keeps every version anyway.
@@ -195,9 +201,13 @@ if wanted.
   models: try `--map leaf`, `--strip 1` or `--prefix`. `--show-model-only`
   lists model blocks without a MAPS object.
 
-## GitHub
+## GitHub, servers and CI
 
-GitHub's web merge button does not run custom merge drivers. Merge locally
-(or in CI) and push. The branch protection setting "require branches to be up
-to date before merging" makes the button safe, because the local merge has
-already happened.
+Merge drivers only run on machines where `setup` was run. GitHub's merge
+button, servers and CI never run them. That is one more reason the shared
+`.gitattributes` keeps `*.MAPS binary` and `*.mdl binary`: there, a merge of
+these files is refused instead of text-merged.
+
+So merge on your own machine and push the result. The branch protection
+setting "require branches to be up to date before merging" makes the button
+safe, because the real merge has then already happened locally.

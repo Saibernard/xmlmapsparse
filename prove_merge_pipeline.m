@@ -250,6 +250,9 @@ try
     g(repo, 'config user.email proof@maps_merge');
     g(repo, 'config user.name "merge proof"');
     g(repo, 'config commit.gpgsign false');
+    % company-wide hooks (a global core.hooksPath demanding a ticket number in
+    % every commit message) must not apply to this throwaway repository
+    g(repo, 'config core.hooksPath', ['"' fullfile(work, 'no-hooks') '"']);
     g(repo, 'config merge.maps.driver', [q '"' py '" "' mapsMergePy '" merge %O %A %B -L %L -P %P' q]);
     g(repo, 'config merge.maps.recursive binary');
     % same Kerberos fix as `maps_merge.py setup`: git starts the tool from a plain
@@ -266,6 +269,7 @@ try
         end
     end
     g(repo, 'config merge.mlAutoMerge.driver', [q pre '"' exe '" %O %A %B %A' q]);
+    g(repo, 'config merge.mlAutoMerge.recursive binary');
     fid = fopen(fullfile(repo, '.gitattributes'), 'w');
     fprintf(fid, '*.MAPS merge=maps diff=maps\n*.mdl binary merge=mlAutoMerge\n');
     fclose(fid);

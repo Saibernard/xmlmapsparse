@@ -684,6 +684,7 @@ class TestGitEndToEnd(unittest.TestCase):
         self.repo = os.path.join(self.d, "repo")
         os.makedirs(self.repo)
         git("init", "-q", "-b", "main", cwd=self.repo)
+        git("config", "core.hooksPath", os.path.join(self.d, "no-hooks"), cwd=self.repo)
         git("config", "user.email", "t@example.com", cwd=self.repo)
         git("config", "user.name", "tester", cwd=self.repo)
         self.base = gen_maps.gen()
@@ -1138,7 +1139,9 @@ class TestMatlabWiring(unittest.TestCase):
     def test_config_lines_linux_with_preload(self):
         lines = dict(mm.git_config_lines("/s/maps_merge.py", "/usr/bin/python", "/ml", "glnxa64", "/ml/k.so"))
         self.assertEqual(lines["merge.mlAutoMerge.driver"],
-                         'env LD_PRELOAD="/ml/k.so" "/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A')
+                         'env LD_PRELOAD="/ml/k.so" "/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A'
+                         + mm.MDL_CONFLICT_WARNING)
+        self.assertEqual(lines["merge.mlAutoMerge.recursive"], "binary")
         self.assertEqual(lines["mergetool.mlMerge.cmd"],
                          'env LD_PRELOAD="/ml/k.so" "/ml/bin/glnxa64/mlMerge" "$BASE" "$LOCAL" "$REMOTE" "$MERGED"')
         self.assertNotIn("LD_PRELOAD", lines["merge.maps.driver"])       # MAPS never needs it
@@ -1146,7 +1149,8 @@ class TestMatlabWiring(unittest.TestCase):
 
     def test_config_lines_without_preload_and_on_windows(self):
         lines = dict(mm.git_config_lines("/s/m.py", "py", "/ml", "glnxa64", None))
-        self.assertEqual(lines["merge.mlAutoMerge.driver"], '"/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A')
+        self.assertEqual(lines["merge.mlAutoMerge.driver"],
+                         '"/ml/bin/glnxa64/mlAutoMerge" %O %A %B %A' + mm.MDL_CONFLICT_WARNING)
         w = dict(mm.git_config_lines("/s/m.py", "py", "/ml", "win64", None))
         self.assertIn("mlAutoMerge.bat", w["merge.mlAutoMerge.driver"])
         self.assertIn("mlMerge.bat", w["mergetool.mlMerge.cmd"])     # MathWorks' own name
@@ -1205,6 +1209,7 @@ class TestMatlabWiring(unittest.TestCase):
             return proc.returncode, out
 
         g("init", "-q")
+        g("config", "core.hooksPath", os.path.join(self.d, "no-hooks"))
         g("config", "user.email", "t@example.com")
         g("config", "user.name", "tester")
         g("config", "commit.gpgsign", "false")
@@ -1235,6 +1240,11 @@ class TestMatlabWiring(unittest.TestCase):
         # 2. automatic merge gives up: conflict, then the merge window resolves it
         code, out = g("merge", "--no-edit", "temp", env={"FAKE_AUTOMERGE_EXIT": "1"})
         self.assertNotEqual(code, 0, out)
+        self.assertIn("MODEL NOT MERGED AUTOMATICALLY:", out)
+        self.assertIn("RQxSV.mdl", out.split("MODEL NOT MERGED AUTOMATICALLY:")[1].split("\n")[0])
+        self.assertIn("Do not git add it yet", out)
+        self.assertIn("git mergetool --tool=mlMerge -- ", out)
+        self.assertEqual(mm.read_text(mdl), "my change\n")      # ours left in place, no markers
         code, status = g("status", "--porcelain")
         self.assertIn("RQxSV.mdl", status)
         code, out = g("mergetool", "--tool=mlMerge", "-y", "--", "RQxSV.mdl")
@@ -1339,6 +1349,95 @@ class TestAttributeSafety(unittest.TestCase):
     def test_mac_arch_names(self):
         self.assertIn(mm.matlab_arch(), ("maca64", "maci64", "glnxa64", "win64"))
         self.assertEqual(mm.matlab_arch("maci64"), "maci64")
+
+
+
+class TestOfficeEnvironment(unittest.TestCase):
+    """Like the office: a global core.hooksPath whose commit-msg hook rejects any
+    message without a ticket number."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        hooks = os.path.join(self.d, "company_hooks")
+        os.makedirs(hooks)
+        hook = os.path.join(hooks, "commit-msg")
+        with open(hook, "w") as fh:
+            fh.write('#!/bin/sh\ngrep -qE "^[A-Z0-9]+-[0-9]+ " "$1" || '
+                     '{ echo "Commit Message should start with Jira ticket"; exit 1; }\n')
+        os.chmod(hook, 0o755)
+        self.home = os.path.join(self.d, "home")
+        os.makedirs(self.home)
+        with open(os.path.join(self.home, ".gitconfig"), "w") as fh:
+            fh.write("[core]\n\thooksPath = %s\n[user]\n\temail = t@example.com\n\tname = t\n" % hooks)
+        self.env = dict(os.environ, HOME=self.home)
+        self.env.pop("GIT_CONFIG_GLOBAL", None)
+        self.env.pop("XDG_CONFIG_HOME", None)
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def test_company_hook_really_rejects(self):
+        repo = os.path.join(self.d, "r")
+        subprocess.check_call(["git", "init", "-q", repo], env=self.env)
+        mm.write_text(os.path.join(repo, "f"), "x\n")
+        subprocess.check_call(["git", "-C", repo, "add", "f"], env=self.env)
+        with open(os.devnull, "w") as devnull:
+            code = subprocess.call(["git", "-C", repo, "commit", "-q", "-m", "base"],
+                                   env=self.env, stdout=devnull, stderr=devnull)
+        self.assertNotEqual(code, 0)          # the fixture works: plain commits are refused
+
+    def test_selftest_git_passes_despite_company_hook(self):
+        maps = os.path.join(self.d, "x.MAPS")
+        mm.write_text(maps, gen_maps.gen())
+        proc = subprocess.Popen([PY, SCRIPT, "selftest", maps, "--git"], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertNotIn("FAIL", out)
+        self.assertIn("26 of 26 checks passed", out)
+
+
+class TestSetupDetails(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def test_git_dir_lookup_survives_old_git_echoing_unknown_options(self):
+        real = os.path.join(self.d, "repo", ".git")
+        os.makedirs(real)
+
+        def old_git(flags):
+            if flags[0].startswith("--path-format"):
+                return "--path-format=absolute\n%s\n" % real      # what git < 2.31 prints
+            return real + "\n"
+        self.assertEqual(mm.find_git_common_dir(old_git), real)
+
+        def broken(flags):
+            raise OSError("no git")
+        self.assertIsNone(mm.find_git_common_dir(broken))
+
+    def test_setup_from_a_subfolder_writes_to_the_repository(self):
+        repo = os.path.join(self.d, "repo")
+        sub = os.path.join(repo, "a", "b")
+        os.makedirs(sub)
+        subprocess.check_call(["git", "init", "-q", repo])
+        proc = subprocess.Popen([PY, SCRIPT, "setup", "--apply", "--local-attributes"], cwd=sub,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertTrue(os.path.isfile(os.path.join(repo, ".git", "info", "attributes")))
+        self.assertFalse(os.path.exists(os.path.join(sub, ".git")))
+
+    def test_preload_ignored_on_windows(self):
+        ml = os.path.join(self.d, "MATLAB")
+        make_fake_matlab(ml, arch="win64", lib=None, tools=False)
+        proc = subprocess.Popen([PY, SCRIPT, "setup", "--matlabroot", ml, "--matlab-arch", "win64",
+                                 "--preload", "/x/lib.so"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = proc.communicate()[0].decode("latin-1")
+        self.assertIn("--preload is ignored on Windows", out)
+        self.assertNotIn("LD_PRELOAD", out.replace("--preload is ignored on Windows (LD_PRELOAD", ""))
 
 
 if __name__ == "__main__":

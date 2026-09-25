@@ -49,6 +49,14 @@ Merge rules
 Notes
   * --check-cmd failure after a clean merge exits 1 with the merged file left
     in place (without markers) so it can be inspected.
+  * When MathWorks' mlAutoMerge cannot merge a model, the model in your folder
+    is only YOUR version and has no conflict markers, so it looks normal. Git
+    lists it as unmerged. Resolve it with  git mergetool --tool=mlMerge  before
+    git add, or the other side's model changes are lost. The driver line that
+    setup writes prints this warning on the terminal when it happens.
+  * Merge drivers only run on machines where setup was run. Servers, CI and
+    GitHub's merge button never run them, so the shared .gitattributes keeps
+    *.MAPS and *.mdl as binary and merging happens locally.
   * Blank or comment lines between records of one block are written after
     that block. Real files have none.
 """
@@ -67,7 +75,7 @@ import tempfile
 import time
 from collections import OrderedDict
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 PY2 = sys.version_info[0] == 2
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1195,10 @@ class SelfTest(object):
         git("config", "user.email", "selftest@maps_merge")
         git("config", "user.name", "maps_merge selftest")
         git("config", "commit.gpgsign", "false")
+        # company-wide hooks (for example a global core.hooksPath that demands a
+        # ticket number in every commit message) must not apply to this
+        # throwaway repository; a folder that does not exist means "no hooks"
+        git("config", "core.hooksPath", os.path.join(self.work, "no-hooks"))
         git("checkout", "-q", "-b", "base")
         write_text(fpath, base_text)
         write_text(os.path.join(repo, ".gitattributes"), "\n".join(ATTR_MAPS) + "\n")
@@ -1701,6 +1713,17 @@ def find_krb5_preload(matlabroot, arch=None):
     return None
 
 
+# Appended to the mlAutoMerge driver line. When MathWorks' tool cannot merge,
+# the model left in the folder is just OUR version, with no markers, so it looks
+# normal; say so loudly. git replaces %P with the file's path.
+MDL_CONFLICT_WARNING = (
+    ' || { echo; echo "maps_merge: MODEL NOT MERGED AUTOMATICALLY:" %P;'
+    ' echo "  The model in your folder is only YOUR version. It has no conflict markers.";'
+    ' echo "  Do not git add it yet, or the other side\'s changes are lost. First run:";'
+    ' echo "    git mergetool --tool=mlMerge --" %P; echo; exit 1; } >&2'
+)
+
+
 def with_preload(command, preload):
     """Prefix a shell command so it runs with LD_PRELOAD set. git runs merge
     drivers and mergetool commands through the shell, so this works inside
@@ -1726,7 +1749,10 @@ def git_config_lines(script, python, matlabroot, arch=None, preload=None):
         gui = matlab_tool_path(matlabroot, "mlMerge", arch)
         lines.append(("merge.mlAutoMerge.name", "MathWorks automatic model merge"))
         lines.append(("merge.mlAutoMerge.driver",
-                      with_preload('"%s" %%O %%A %%B %%A' % auto, preload)))
+                      with_preload('"%s" %%O %%A %%B %%A' % auto, preload) + MDL_CONFLICT_WARNING))
+        # criss-cross histories: git merges the merge bases first; keep the
+        # original base there instead of running the model merge on them
+        lines.append(("merge.mlAutoMerge.recursive", "binary"))
         # the Three-Way Merge window, for model conflicts:
         #   git mergetool --tool=mlMerge -- path/to/model.mdl
         lines.append(("mergetool.mlMerge.cmd",
@@ -1747,7 +1773,9 @@ def cmd_setup(args):
             path = matlab_tool_path(args.matlabroot, tool, arch)
             if not os.path.isfile(path):
                 print("# WARNING: %s not found at %s" % (tool, path))
-        if args.preload:
+        if args.preload and arch.startswith("win"):
+            print("# WARNING: --preload is ignored on Windows (LD_PRELOAD is a Linux setting)")
+        elif args.preload:
             preload = args.preload
             if not os.path.isfile(preload):
                 print("# WARNING: preload library not found: %s" % preload)
@@ -1785,15 +1813,7 @@ def cmd_setup(args):
         if code != 0:
             return 1
     if args.local_attributes:
-        gitdir = None
-        for flag in ("--git-common-dir", "--git-dir"):
-            try:
-                gitdir = subprocess.check_output(["git", "rev-parse", flag]).strip()
-                if not PY2:
-                    gitdir = gitdir.decode("utf-8")
-                break
-            except (subprocess.CalledProcessError, OSError):
-                gitdir = None
+        gitdir = find_git_common_dir()
         if not gitdir:
             print("ERR not inside a git repository, attributes not written")
             return 1
@@ -1827,6 +1847,28 @@ def cmd_setup(args):
         if missing:
             return 1
     return 0
+
+
+def _git_rev_parse(flags):
+    with open(os.devnull, "w") as devnull:
+        out = subprocess.check_output(["git", "rev-parse"] + flags, stderr=devnull)
+    return out if PY2 else out.decode("utf-8")
+
+
+def find_git_common_dir(run=_git_rev_parse):
+    """The repository's .git folder, shared by all its worktrees, or None."""
+    for flags in (["--path-format=absolute", "--git-common-dir"],   # git 2.31+
+                  ["--git-common-dir"], ["--git-dir"]):
+        try:
+            out = run(flags)
+        except (subprocess.CalledProcessError, OSError):
+            continue
+        # an old git echoes options it does not know and still exits 0, so only
+        # the last line counts, and only when it is a real folder
+        found = [l for l in out.splitlines() if l.strip()]
+        if found and not found[-1].startswith("-") and os.path.isdir(found[-1]):
+            return found[-1]
+    return None
 
 
 def _sh_quote(s):
