@@ -13,8 +13,126 @@ away. After this setup:
   differently on both sides, or the same subsystem changed on both sides.
   Nothing is dropped silently.
 
+## Quick start
+
+Everything needed to get going, in order. Sections 1 to 14 below explain each
+step in detail.
+
+Replace these placeholders in the commands below:
+
+| Placeholder | What to put there | How to find it |
+|---|---|---|
+| `<MATLABROOT>` | the MATLAB install folder | in MATLAB, type `matlabroot` |
+| `<your clone>` | the root folder of your clone of the repository | the folder that contains `.git` |
+| `path/to/Example.MAPS` | your MAPS file, as a path from the root of the clone | for example `folder/sub/Name.MAPS` |
+| `path/to/Example.mdl` | your model, as a path from the root of the clone | same folder as the MAPS file, usually |
+| `<branch>` | the branch you are merging in, for example `develop` | `git branch` lists them |
+| `<TICKET>` | your ticket number | from your task |
+
+Save the script as `~/maps_merge.py` in step 1, and run every other command
+from the **root folder of your clone**.
+
+### Step 1. Get the script, once per person
+
+Open `maps_merge.py` in this repository on GitHub, click **Raw**, copy
+everything, and save it as `maps_merge.py` in your home folder. Then:
+
+```
+python ~/maps_merge.py --version
+```
+
+Expected: `maps_merge 1.3.0` or newer.
+
+### Step 2. Connect your clone, once per clone
+
+```
+cd <your clone>
+python ~/maps_merge.py setup --apply --local-attributes --matlabroot <MATLABROOT>
+```
+
+Expected: a line starting with `# MATLAB merge tools will start with LD_PRELOAD=`,
+then `ok` lines, and **no** line starting with `WARNING`.
+
+### Step 3. Check it is connected
+
+```
+git check-attr merge -- path/to/Example.MAPS path/to/Example.mdl
+```
+
+Expected:
+
+```
+path/to/Example.MAPS: merge: maps
+path/to/Example.mdl: merge: mlAutoMerge
+```
+
+### Step 4. Test it on your real MAPS file
+
+It works on temporary copies. Your file is never changed.
+
+```
+python ~/maps_merge.py selftest path/to/Example.MAPS --git
+```
+
+Expected last line: `26 of 26 checks passed. Source file untouched.`
+
+### Step 5. Merge
+
+Close the MAPS editor and Simulink first. Then merge, with a ticket number in
+the message:
+
+```
+git merge <branch> -m "<TICKET> merge <branch>"
+```
+
+Read the `maps_merge:` lines in the output:
+
+| What it prints | What to do |
+|---|---|
+| `... 0 conflict(s)` for the MAPS file | Nothing. The MAPS file is merged. |
+| `CONFLICT parameter_value ...` for the MAPS file | Fix that record in a text editor, see section 8. |
+| `MODEL NOT MERGED AUTOMATICALLY` | Open the merge window, step 6. |
+
+### Step 6. If the model did not merge: the merge window
+
+From the **root folder of your clone**:
+
+```
+git mergetool --tool=mlMerge -- path/to/Example.mdl
+```
+
+In the window:
+
+1. Click **Show**, the eye icon, so hidden rows appear. The item that stopped
+   the merge is often hidden by the filters.
+2. For each row with a red icon, pick **Theirs** or **Mine**. For a row with no
+   option buttons, click the small arrow next to its red icon and choose
+   **accept and mark complete**.
+3. **Do not close the Simulink windows** the merge window opens. If you are
+   asked whether to save `targetFile.mdl`, click **Yes**. Answering No throws
+   away your choices.
+4. Click **Accept & Close**.
+
+Details and examples: section 9.
+
+### Step 7. Finish
+
+```
+git status
+git commit -m "<TICKET> merge <branch>"
+```
+
+Before committing, `git status` must not list any file under "Unmerged paths".
+Open both files once to confirm both sides' changes are there.
+
+If anything goes wrong before you commit, `git merge --abort` puts everything
+back.
+
+---
+
 ## Contents
 
+0. Quick start
 1. How it works
 2. What you need
 3. Install, once per person
@@ -350,6 +468,21 @@ The Three-Way Merge window opens:
 └────────────────────────────────────────────┘
 ```
 
+Run `git mergetool` from the **root folder of your clone**. Git reads the path
+relative to the folder you are in. From a subfolder it finds nothing and says
+`No files need merging`.
+
+**Leave the Simulink windows alone.** When you click a row, the merge window
+opens the models in Simulink to highlight the block. Its merged model,
+`targetFile.mdl`, holds your choices. If you close it and answer **No** to
+"save?", your choices are thrown away, and Accept & Close then saves only your
+own version. If asked to save `targetFile.mdl`, click **Yes**.
+
+**Click Show first.** The filters hide lines, block defaults and non-functional
+changes, such as ZOrder, the drawing order of overlapping blocks. The item that
+stopped the merge is often one of those. If the panel says
+"Resolve remaining 1 changes" but you see no red row, it is hidden.
+
 In the Target pane:
 
 1. **Red rows with a warning icon** are conflicts. Rows coloured like one side
@@ -361,7 +494,13 @@ In the Target pane:
    is already in Target.
 4. If the tool cannot combine something, for example a wire both of you
    changed, pick the closer version, or right-click and choose
-   **Mark as Resolved**. You fix it by hand in step 6.
+   **Mark as Resolved**. You fix it by hand in step 6. For a row with no option
+   buttons, such as a ZOrder clash, click the small arrow next to its red icon
+   and choose the grey tick, "accepted this change and marked it complete".
+   ZOrder only decides which overlapping block is drawn on top, so either
+   value is safe.
+   Rows named like `block:1 -> Branch` are **wires**: output port 1 of `block`,
+   going to a branch point. Keep a new block and its wires from the same side.
 5. Click **Accept & Close**. The merged model is saved and staged.
 6. Open the model in Simulink, add anything the tool could not combine, such as
    a missing wire, and save. If you changed it, run
@@ -427,7 +566,9 @@ touched.
 | `MODEL NOT MERGED AUTOMATICALLY` | Same subsystem changed on both sides, or the model merger could not run. | Section 9. Note which rows are red, which shows why. |
 | `key for ... widened` | Information only. Two records shared an identity, so a wider one was used. | Nothing. |
 | `cannot merge, ... malformed record` | A line in one version is not a valid MAPS record. Your file is untouched. | Fix that line, commit, merge again. |
-| Merge window opens although you changed different subsystems | Something shared also changed, such as a port on the parent subsystem or the model's version number. | Resolve in the window. Nothing is lost. |
+| Merge window opens although you changed different subsystems | Something inside the same subsystem also changed on both sides. On real merges this was a block's ZOrder, its drawing order, which Simulink changes on its own. | Click Show, resolve the hidden row, Accept & Close. Nothing is lost. |
+| `git mergetool` says `No files need merging` | You ran it from a subfolder, so the path pointed nowhere. Or the merge was already finished or committed. | Run it from the root folder of your clone. Check `git status`. |
+| The merged model is missing the other side's change | The Simulink window of `targetFile.mdl` was closed with **No** to saving. | Redo the merge. Not committed yet: `git merge --abort`. Already committed and not pushed: check that `git log --oneline -1` shows the merge, then `git reset --hard HEAD^1`. Then merge again. |
 
 ---
 
