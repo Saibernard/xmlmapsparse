@@ -1,5 +1,7 @@
 # maps_merge
 
+**Slides:** [open the online deck](https://claude.ai/artifact/BKRANbQay3A3K8AXXLCCJq) · [download the PowerPoint](slides/Parallel_Model_Merging.pptx) · [setup guide](GUIDE.md)
+
 Git merge support for the servo-group repo: MAPS files are merged record by
 record by `maps_merge.py`, MDL/SLX models are merged by MathWorks' own
 `mlAutoMerge`, and `maps_merge.py crosscheck` verifies that a merged model and
