@@ -2,6 +2,7 @@
 
 ## Slides
 
+- **Slide pictures and all their text, to copy and paste:** [slides/README.md](slides/README.md)
 - **Online deck (click to open):** https://claude.ai/artifact/BKRANbQay3A3K8AXXLCCJq
 - **PowerPoint file:** [slides/Parallel_Model_Merging.pptx](slides/Parallel_Model_Merging.pptx)
 - **Setup guide:** [GUIDE.md](GUIDE.md)
