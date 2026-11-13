@@ -8,12 +8,13 @@ Hi,
 
 We've added a Git merge tool for MAPS files and Simulink models to our repo at `tools/maps_merge.py`. Could you enable it for all users? It needs two one-time steps.
 
-**How it works:** Git lets you register a "merge driver", a command that Git itself runs during `git merge`, `git pull` and `git rebase` for certain file types. Today the repo's `.gitattributes` marks MAPS and model files as `binary`, so Git refuses to merge them and people redo their changes by hand. The steps below change two things:
+We added a merge script and changed two Git settings files. The script is `tools/maps_merge.py`, which merges MAPS files record by record.
 
-- **Git config** registers the drivers: MAPS files go to our merger, which merges record by record, and models go to MathWorks' command-line merge (`mlAutoMerge`, with a fix for a Linux library crash).
-- **A per-clone attributes file** routes `*.MAPS` and `*.mdl` to those drivers, overriding `binary` locally.
+The Git config file now registers two merge tools: our script for MAPS files, and MathWorks' mlAutoMerge for models, with a fix for a Linux library crash.
 
-After that, merging needs no extra steps and no separate GUI. Git calls the driver automatically, which writes the merged file in place and tells Git whether it was clean or a conflict. The Three-Way Merge window is only needed when a model really clashes. The shared `.gitattributes` stays `binary`, so the server's merge button, which can't run these drivers, keeps refusing these files instead of text-merging them.
+The `.git/info/attributes` file in each clone now sends `*.MAPS` files to our script and `*.mdl` files to mlAutoMerge, instead of treating them as binary. This file is local to each clone and never committed. The template in step 2 copies it into every new clone automatically.
+
+The repo's `.gitattributes` stays as it is. With these in place, Git merges these files automatically during a normal `git merge` or `git pull`.
 
 **1. Tell Git about the merge tools (system-wide).** Run this from the root of a clone of the repo:
 
